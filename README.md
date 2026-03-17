@@ -87,6 +87,10 @@ Any non-command text message is also forwarded to ZeroClaw.
 - Some interactive shell commands are blocked and replaced with a hint.
 - Unauthorized access attempts are logged to stderr.
 
+## License
+
+MIT. See `LICENSE`.
+
 ## Suggested First GitHub Commit
 
 The repository should include:
