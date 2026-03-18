@@ -6,6 +6,8 @@ Small Rust Telegram bot that forwards prompts to a local `zeroclaw` binary and c
 
 - Accepts Telegram messages from one authorized user.
 - Sends plain text prompts to `zeroclaw agent -m "<prompt>"`.
+- Downloads Telegram documents and photos into a local workspace directory and passes their paths to ZeroClaw.
+- Can send local files and images back into Telegram.
 - Supports helper commands such as `/ping`, `/date`, `/free`, `/uptime`, and `/status`.
 - Supports direct shell execution with `/sh ...`.
 - Serializes requests so it behaves predictably on low-power hardware such as Raspberry Pi 1.
@@ -104,6 +106,8 @@ If you want it to stay running on a server or Raspberry Pi, run the compiled bin
 | `/free` | Run `free -h` |
 | `/uptime` | Run `uptime` |
 | `/status` | Run `systemctl --user status zeroclaw -n 40 --no-pager` |
+| `/sendfile <path>` | Send a local file into Telegram |
+| `/sendphoto <path>` | Send a local image into Telegram as a photo |
 | `/help` | Show built-in command help |
 
 Any non-command text message is also forwarded to ZeroClaw.
@@ -112,6 +116,10 @@ Any non-command text message is also forwarded to ZeroClaw.
 
 - Long replies are split into Telegram-sized chunks.
 - ANSI escape sequences are stripped from command output.
+- Telegram documents and photos are stored under `.telegram_uploads/` so ZeroClaw can inspect them with local tools.
+- ZeroClaw can request a real Telegram upload by emitting one of these lines on its own line:
+  `[[telegram_document:relative/or/absolute/path|optional caption]]`
+  `[[telegram_photo:relative/or/absolute/path|optional caption]]`
 - Some interactive shell commands are blocked and replaced with a hint.
 - Unauthorized access attempts are logged to stderr.
 
