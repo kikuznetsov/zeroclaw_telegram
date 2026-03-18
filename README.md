@@ -1,4 +1,4 @@
-# Telegram ZeroClaw Bridge
+# Robust ZeroClaw Bridge to Telegram 
 
 Small Rust Telegram bot that forwards prompts to a local `zeroclaw` binary and can also run a limited set of host shell commands.
 
@@ -91,15 +91,3 @@ Any non-command text message is also forwarded to ZeroClaw.
 
 MIT. See `LICENSE`.
 
-## Suggested First GitHub Commit
-
-The repository should include:
-
-- `Cargo.toml`
-- `Cargo.lock`
-- `src/main.rs`
-- `.gitignore`
-- `.env.example`
-- `README.md`
-
-Do not commit `target/`, `.DS_Store`, or your real bot token.
