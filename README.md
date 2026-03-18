@@ -23,6 +23,7 @@ Do not expose this bot to multiple users unless you redesign the authorization m
 ## Requirements
 
 - Rust toolchain
+- `cross` for Raspberry Pi 1 ARMv6 builds
 - A Telegram bot token from BotFather
 - A working local `zeroclaw` binary
 - Linux shell utilities if you want to use `/date`, `/free`, `/uptime`, `/status`
@@ -50,9 +51,36 @@ To discover `TG_ALLOWED_USER_ID`, you can:
 
 ## Build And Run
 
-```bash
-cargo build --release
+Install `cross` if needed:
 
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+```
+
+Build for Raspberry Pi 1 ARMv6:
+
+```bash
+cross build --release --target arm-unknown-linux-gnueabihf
+```
+
+The binary will be written to:
+
+```bash
+target/arm-unknown-linux-gnueabihf/release/tg-zeroclaw-bridge
+```
+
+Then set the runtime environment and run it on the target machine:
+
+```bash
+export TG_BOT_TOKEN="1234567890:your_token"
+export TG_ALLOWED_USER_ID="123456789"
+export ZEROCLAW_BIN="/home/konst/zeroclaw"
+export ZEROCLAW_TIMEOUT_SEC="240"
+```
+
+For a local native run during development:
+
+```bash
 export TG_BOT_TOKEN="1234567890:your_token"
 export TG_ALLOWED_USER_ID="123456789"
 export ZEROCLAW_BIN="/home/konst/zeroclaw"
@@ -90,4 +118,3 @@ Any non-command text message is also forwarded to ZeroClaw.
 ## License
 
 MIT. See `LICENSE`.
-

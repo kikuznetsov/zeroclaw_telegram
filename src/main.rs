@@ -4,15 +4,28 @@ use std::env;
 use std::process::Stdio;
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
+use teloxide::types::{MessageId, ParseMode};
 use teloxide::utils::command::BotCommands;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
-use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{timeout, Duration, Instant};
 
 const TELEGRAM_CHUNK: usize = 3500;
 const DEFAULT_ZEROCLAW_BIN: &str = "/home/konst/zeroclaw";
 const DEFAULT_TIMEOUT_SEC: u64 = 240;
+const STATUS_UPDATE_INTERVAL_MS: u64 = 800;
+
+#[derive(Clone, Copy)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+struct StreamEvent {
+    kind: StreamKind,
+    line: String,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -175,9 +188,9 @@ async fn send_status(bot: &Bot, chat_id: ChatId, text: &str) -> Result<Message> 
 async fn run_and_reply(bot: &Bot, chat_id: ChatId, prompt: &str, state: &AppState) -> Result<()> {
     let _guard = state.run_lock.lock().await;
 
-    let status_msg = send_status(bot, chat_id, "🧠 ZeroClaw is thinking...").await?;
+    let status_msg = send_status(bot, chat_id, &thinking_status_text(0)).await?;
 
-    let output = run_zeroclaw(prompt, state)
+    let output = run_zeroclaw(bot, chat_id, status_msg.id, prompt, state)
         .await
         .unwrap_or_else(|e| format!("❌ Error:\n{e:#}"));
 
@@ -251,32 +264,101 @@ async fn run_shell_and_reply(
     Ok(())
 }
 
-async fn run_zeroclaw(prompt: &str, state: &AppState) -> Result<String> {
+async fn run_zeroclaw(
+    bot: &Bot,
+    chat_id: ChatId,
+    status_msg_id: MessageId,
+    prompt: &str,
+    state: &AppState,
+) -> Result<String> {
     let mut cmd = Command::new(&state.zeroclaw_bin);
     cmd.arg("agent")
         .arg("-m")
         .arg(prompt)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("RUST_LOG", "error")
+        .env("ZEROCLAW_OBSERVABILITY_BACKEND", "log")
+        .env(
+            "RUST_LOG",
+            "zeroclaw::agent=info,zeroclaw::tools=info,error",
+        )
         .env("CLICOLOR", "0")
         .env("NO_COLOR", "1");
 
-    let fut = cmd.output();
+    let mut child = cmd.spawn().context("Failed to spawn zeroclaw")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture zeroclaw stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture zeroclaw stderr"))?;
 
-    let output = timeout(Duration::from_secs(state.zeroclaw_timeout_sec), fut)
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let stdout_task = tokio::spawn(read_stream(stdout, StreamKind::Stdout, tx.clone()));
+    let stderr_task = tokio::spawn(read_stream(stderr, StreamKind::Stderr, tx.clone()));
+    drop(tx);
+
+    let status = timeout(
+        Duration::from_secs(state.zeroclaw_timeout_sec),
+        async {
+            let mut tool_iterations = 0usize;
+            let mut last_status_update = Instant::now() - Duration::from_millis(STATUS_UPDATE_INTERVAL_MS);
+
+            let exit_status = loop {
+                tokio::select! {
+                    Some(event) = rx.recv() => {
+                        if should_count_tool_iteration(&event) {
+                            tool_iterations += 1;
+                            if last_status_update.elapsed() >= Duration::from_millis(STATUS_UPDATE_INTERVAL_MS) {
+                                if let Err(err) = update_thinking_status(
+                                    bot,
+                                    chat_id,
+                                    status_msg_id,
+                                    tool_iterations,
+                                )
+                                .await
+                                {
+                                    eprintln!("failed to update thinking status: {err:#}");
+                                }
+                                last_status_update = Instant::now();
+                            }
+                        }
+                    }
+                    wait_result = child.wait() => break wait_result.context("Failed to wait for zeroclaw")?,
+                }
+            };
+
+            while rx.recv().await.is_some() {}
+
+            Ok::<_, anyhow::Error>(exit_status)
+        },
+    )
+    .await;
+
+    let output = match status {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(anyhow!("ZeroClaw timed out"));
+        }
+    };
+
+    let stdout_raw = stdout_task
         .await
-        .context("ZeroClaw timed out")?
-        .context("Failed to spawn zeroclaw")?;
-
-    let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
+        .context("Failed to join zeroclaw stdout task")??;
+    let stderr_raw = stderr_task
+        .await
+        .context("Failed to join zeroclaw stderr task")??;
 
     let stdout = clean_zeroclaw_output(&stdout_raw);
     let stderr = strip_ansi(&stderr_raw).trim().to_string();
 
-    if !output.status.success() {
-        let mut msg = format!("[zeroclaw exit={}]", output.status);
+    if !output.success() {
+        let mut msg = format!("[zeroclaw exit={}]", output);
         if !stderr.is_empty() {
             msg.push_str("\n\nstderr:\n");
             msg.push_str(&stderr);
@@ -292,6 +374,67 @@ async fn run_zeroclaw(prompt: &str, state: &AppState) -> Result<String> {
         Ok("(no output)".to_string())
     } else {
         Ok(stdout.trim().to_string())
+    }
+}
+
+async fn read_stream<R>(
+    reader: R,
+    kind: StreamKind,
+    tx: mpsc::UnboundedSender<StreamEvent>,
+) -> Result<String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut lines = BufReader::new(reader).lines();
+    let mut collected = String::new();
+
+    while let Some(line) = lines.next_line().await? {
+        collected.push_str(&line);
+        collected.push('\n');
+
+        let _ = tx.send(StreamEvent {
+            kind,
+            line: line.clone(),
+        });
+    }
+
+    Ok(collected)
+}
+
+fn thinking_status_text(tool_iterations: usize) -> String {
+    format!(
+        "🧠 ZeroClaw is thinking...\n🔧 Tool iterations: {}",
+        tool_iterations
+    )
+}
+
+async fn update_thinking_status(
+    bot: &Bot,
+    chat_id: ChatId,
+    status_msg_id: MessageId,
+    tool_iterations: usize,
+) -> Result<()> {
+    bot.edit_message_text(
+        chat_id,
+        status_msg_id,
+        thinking_status_text(tool_iterations),
+    )
+    .await?;
+
+    Ok(())
+}
+
+fn should_count_tool_iteration(event: &StreamEvent) -> bool {
+    let line = strip_ansi(&event.line);
+
+    match event.kind {
+        StreamKind::Stdout | StreamKind::Stderr => {
+            line.contains("zeroclaw::tools::")
+                && (line.contains("tool_execution{") || line.contains("tool_execute{"))
+                && (line.contains("status=")
+                    || line.contains("success=")
+                    || line.contains("exit_code="))
+        }
     }
 }
 
@@ -403,4 +546,29 @@ fn split_text(text: &str, chunk_size: usize) -> Vec<String> {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_tool_iteration_log_lines() {
+        let event = StreamEvent {
+            kind: StreamKind::Stderr,
+            line: r#"2025-01-15T10:23:46.789Z  INFO zeroclaw::tools::shell: tool_execution{tool="shell" command="ls -la"} status=success stdout_bytes=1024"#.to_string(),
+        };
+
+        assert!(should_count_tool_iteration(&event));
+    }
+
+    #[test]
+    fn ignores_non_tool_log_lines() {
+        let event = StreamEvent {
+            kind: StreamKind::Stderr,
+            line: r#"2025-01-15T10:23:45.456Z  INFO zeroclaw::providers::reliable: provider_call{provider="anthropic" model="claude-sonnet-4"} request_sent"#.to_string(),
+        };
+
+        assert!(!should_count_tool_iteration(&event));
+    }
 }
