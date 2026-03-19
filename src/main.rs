@@ -30,6 +30,7 @@ const BRIDGE_PROTOCOL_INSTRUCTIONS: &str = r#"Telegram bridge capability note:
 - If you want to send a real file into the Telegram chat, output exactly one of these marker lines on its own line:
   [[telegram_document:relative/or/absolute/path|optional caption]]
   [[telegram_photo:relative/or/absolute/path|optional caption]]
+- Do not wrap marker lines in Markdown, bold markers, code fences, or any other formatting.
 - Only use these markers when the file already exists on the local machine.
 - Do not say a file was sent unless you emitted one of those marker lines.
 "#;
@@ -743,6 +744,7 @@ fn extract_requested_attachment_path(text: &str) -> Option<String> {
 
 fn is_recent_file_followup_request(text: &str) -> bool {
     let text_lower = text.to_ascii_lowercase();
+    let text_lower = text_lower.trim();
 
     (text_lower.contains("send") || text_lower.contains("upload"))
         && (text_lower.contains("located file")
@@ -751,7 +753,13 @@ fn is_recent_file_followup_request(text: &str) -> bool {
             || text_lower.contains("located document")
             || text_lower.contains("found document")
             || text_lower.contains("located image")
-            || text_lower.contains("found image"))
+            || text_lower.contains("found image")
+            || text_lower.contains("send it")
+            || text_lower.contains("upload it")
+            || text_lower.contains("send this")
+            || text_lower.contains("upload this")
+            || text_lower.contains("send that")
+            || text_lower.contains("upload that"))
 }
 
 fn infer_attachment_kind(text: &str, path: &str) -> OutgoingAttachmentKind {
@@ -1054,8 +1062,10 @@ fn is_zeroclaw_telemetry_line(event: &StreamEvent) -> bool {
 }
 
 fn extract_outgoing_attachments(output: &str) -> (String, Vec<OutgoingAttachment>) {
-    let re = Regex::new(r"(?m)^\[\[telegram_(document|photo):([^\]\|]+?)(?:\|([^\]]*))?\]\]\s*$")
-        .unwrap();
+    let re = Regex::new(
+        r"(?m)^\s*(?:\*\*|__|`)?\s*\[\[telegram_(document|photo):([^\]\|]+?)(?:\|([^\]]*))?\]\]\s*(?:\*\*|__|`)?\s*$",
+    )
+    .unwrap();
 
     let mut attachments = Vec::new();
 
@@ -1484,6 +1494,26 @@ mod tests {
     }
 
     #[test]
+    fn extracts_markdown_wrapped_outgoing_attachment_markers() {
+        let output =
+            "Here is the file.\n**[[telegram_document:/home/konst/.zeroclaw/workspace/volcano_modelling.ics|Calendar file]]**";
+
+        let (text, attachments) = extract_outgoing_attachments(output);
+
+        assert_eq!(text, "Here is the file.");
+        assert_eq!(attachments.len(), 1);
+        assert!(matches!(
+            attachments[0].kind,
+            OutgoingAttachmentKind::Document
+        ));
+        assert_eq!(
+            attachments[0].path,
+            PathBuf::from("/home/konst/.zeroclaw/workspace/volcano_modelling.ics")
+        );
+        assert_eq!(attachments[0].caption.as_deref(), Some("Calendar file"));
+    }
+
+    #[test]
     fn raw_prompt_mode_skips_bridge_wrapper() {
         assert_eq!(
             build_zeroclaw_prompt("hello", PromptMode::Raw),
@@ -1513,6 +1543,7 @@ mod tests {
     fn detects_recent_file_followup_requests() {
         assert!(is_recent_file_followup_request("send me located file"));
         assert!(is_recent_file_followup_request("upload the file you found"));
+        assert!(is_recent_file_followup_request("send it to me"));
         assert!(!is_recent_file_followup_request(
             "send me a summary instead"
         ));
