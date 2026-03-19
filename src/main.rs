@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,6 +19,7 @@ use tokio::time::{timeout, Duration, Instant};
 
 const TELEGRAM_CHUNK: usize = 3500;
 const DEFAULT_ZEROCLAW_BIN: &str = "/home/konst/zeroclaw";
+const DEFAULT_ZEROCLAW_WORKSPACE_SUFFIX: &str = ".zeroclaw/workspace";
 const DEFAULT_TIMEOUT_SEC: u64 = 240;
 const STATUS_UPDATE_INTERVAL_MS: u64 = 800;
 const TELEGRAM_UPLOADS_DIR: &str = ".telegram_uploads";
@@ -74,13 +76,20 @@ struct OutgoingAttachment {
     caption: Option<String>,
 }
 
+#[derive(Default)]
+struct ChatContext {
+    last_referenced_paths: Vec<PathBuf>,
+}
+
 #[derive(Clone)]
 struct AppState {
     allowed_user_id: i64,
     zeroclaw_bin: String,
+    zeroclaw_workspace_dir: Option<PathBuf>,
     zeroclaw_timeout_sec: u64,
     /// Serialize requests because the target host is resource-constrained.
     run_lock: Arc<Mutex<()>>,
+    chat_contexts: Arc<Mutex<HashMap<i64, ChatContext>>>,
 }
 
 #[derive(BotCommands, Clone)]
@@ -122,6 +131,9 @@ async fn main() -> Result<()> {
 
     let zeroclaw_bin =
         env::var("ZEROCLAW_BIN").unwrap_or_else(|_| DEFAULT_ZEROCLAW_BIN.to_string());
+    let zeroclaw_workspace_dir = env::var_os("ZEROCLAW_WORKSPACE_DIR")
+        .map(PathBuf::from)
+        .or_else(default_zeroclaw_workspace_dir);
 
     let zeroclaw_timeout_sec: u64 = env::var("ZEROCLAW_TIMEOUT_SEC")
         .ok()
@@ -133,8 +145,10 @@ async fn main() -> Result<()> {
     let state = AppState {
         allowed_user_id,
         zeroclaw_bin,
+        zeroclaw_workspace_dir,
         zeroclaw_timeout_sec,
         run_lock: Arc::new(Mutex::new(())),
+        chat_contexts: Arc::new(Mutex::new(HashMap::new())),
     };
 
     println!("Telegram ZeroClaw bridge started.");
@@ -223,31 +237,35 @@ async fn handle_message(bot: Bot, msg: Message, state: AppState) -> Result<()> {
                     return Ok(());
                 }
                 Cmd::Sendfile(path) => {
-                    send_local_attachment(
+                    let sent_path = send_local_attachment(
                         &bot,
                         msg.chat.id,
                         OutgoingAttachmentKind::Document,
                         &path,
                         None,
+                        &state,
                     )
                     .await?;
+                    set_last_referenced_paths(&state, msg.chat.id, vec![sent_path]).await;
                     return Ok(());
                 }
                 Cmd::Sendphoto(path) => {
-                    send_local_attachment(
+                    let sent_path = send_local_attachment(
                         &bot,
                         msg.chat.id,
                         OutgoingAttachmentKind::Photo,
                         &path,
                         None,
+                        &state,
                     )
                     .await?;
+                    set_last_referenced_paths(&state, msg.chat.id, vec![sent_path]).await;
                     return Ok(());
                 }
             }
         }
 
-        if try_handle_direct_send_request(&bot, msg.chat.id, text).await? {
+        if try_handle_direct_send_request(&bot, msg.chat.id, text, &state).await? {
             return Ok(());
         }
 
@@ -308,6 +326,17 @@ async fn run_and_reply(
         }
     }
 
+    let mut referenced_paths = extract_existing_file_paths_from_text(&result.output, state);
+    for attachment in &outgoing_attachments {
+        if let Ok(path) = resolve_existing_local_path(&attachment.path.display().to_string(), state)
+        {
+            referenced_paths.push(path);
+        }
+    }
+    if !referenced_paths.is_empty() {
+        set_last_referenced_paths(state, chat_id, referenced_paths).await;
+    }
+
     for attachment in outgoing_attachments {
         if let Err(err) = send_local_attachment(
             bot,
@@ -315,6 +344,7 @@ async fn run_and_reply(
             attachment.kind,
             &attachment.path.display().to_string(),
             attachment.caption.as_deref(),
+            state,
         )
         .await
         {
@@ -543,7 +573,9 @@ fn build_attachment_prompt(caption: &str, attachments: &[DownloadedAttachment]) 
 fn build_zeroclaw_prompt(prompt: &str, prompt_mode: PromptMode) -> String {
     match prompt_mode {
         PromptMode::Raw => prompt.to_string(),
-        PromptMode::Bridge => format!("{BRIDGE_PROTOCOL_INSTRUCTIONS}\nUser request:\n{prompt}"),
+        PromptMode::Bridge => format!(
+            "{BRIDGE_PROTOCOL_INSTRUCTIONS}\nPrefer absolute file paths when you reference or send local files.\n\nUser request:\n{prompt}"
+        ),
     }
 }
 
@@ -594,62 +626,103 @@ fn detect_mime_from_path(path: &str) -> String {
     }
 }
 
-async fn try_handle_direct_send_request(bot: &Bot, chat_id: ChatId, text: &str) -> Result<bool> {
-    let Some(requested_path) = extract_requested_attachment_path(text) else {
-        return Ok(false);
-    };
+async fn try_handle_direct_send_request(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &AppState,
+) -> Result<bool> {
+    if let Some(requested_path) = extract_requested_attachment_path(text) {
+        let requested_path = requested_path.trim();
+        if requested_path.is_empty() {
+            return Ok(false);
+        }
 
-    let requested_path = requested_path.trim();
-    if requested_path.is_empty() {
-        return Ok(false);
-    }
+        let preferred_kind = infer_attachment_kind(text, requested_path);
 
-    let preferred_kind = infer_attachment_kind(text, requested_path);
+        if let Ok(resolved) = resolve_existing_local_path(requested_path, state) {
+            let sent_path = send_local_attachment(
+                bot,
+                chat_id,
+                preferred_kind,
+                &resolved.display().to_string(),
+                None,
+                state,
+            )
+            .await?;
+            set_last_referenced_paths(state, chat_id, vec![sent_path]).await;
+            return Ok(true);
+        }
 
-    if let Ok(resolved) = resolve_local_path(requested_path) {
-        if let Ok(metadata) = fs::metadata(&resolved).await {
-            if metadata.is_file() {
-                send_local_attachment(
+        let matches = find_workspace_files_by_name(requested_path, state)
+            .with_context(|| format!("Failed to search workspace for `{requested_path}`"))?;
+
+        return match matches.as_slice() {
+            [] => Ok(false),
+            [path] => {
+                let sent_path = send_local_attachment(
                     bot,
                     chat_id,
                     preferred_kind,
-                    &resolved.display().to_string(),
+                    &path.display().to_string(),
                     None,
+                    state,
                 )
                 .await?;
-                return Ok(true);
+                set_last_referenced_paths(state, chat_id, vec![sent_path]).await;
+                Ok(true)
             }
-        }
+            _ => {
+                set_last_referenced_paths(state, chat_id, matches.clone()).await;
+
+                let mut msg = format!(
+                    "Multiple files match `{}`. Use `/sendfile <path>` or `/sendphoto <path>` with an exact path.\n",
+                    requested_path
+                );
+
+                for path in matches.iter().take(MAX_DIRECT_SEND_MATCHES) {
+                    msg.push_str("- ");
+                    msg.push_str(&path.display().to_string());
+                    msg.push('\n');
+                }
+
+                bot.send_message(chat_id, msg.trim_end().to_string())
+                    .await?;
+                Ok(true)
+            }
+        };
     }
 
-    let matches = find_workspace_files_by_name(requested_path)
-        .with_context(|| format!("Failed to search workspace for `{requested_path}`"))?;
+    if !is_recent_file_followup_request(text) {
+        return Ok(false);
+    }
 
-    match matches.as_slice() {
+    let referenced_paths = get_last_referenced_paths(state, chat_id).await;
+    match referenced_paths.as_slice() {
         [] => Ok(false),
         [path] => {
-            send_local_attachment(
+            let preferred_kind = infer_attachment_kind(text, &path.display().to_string());
+            let sent_path = send_local_attachment(
                 bot,
                 chat_id,
                 preferred_kind,
                 &path.display().to_string(),
                 None,
+                state,
             )
             .await?;
+            set_last_referenced_paths(state, chat_id, vec![sent_path]).await;
             Ok(true)
         }
         _ => {
-            let mut msg = format!(
-                "Multiple files match `{}`. Use `/sendfile <path>` or `/sendphoto <path>` with an exact path.\n",
-                requested_path
+            let mut msg = String::from(
+                "I found multiple recent file paths. Use `/sendfile <path>` or `/sendphoto <path>` with an exact path.\n",
             );
-
-            for path in matches.iter().take(MAX_DIRECT_SEND_MATCHES) {
+            for path in referenced_paths.iter().take(MAX_DIRECT_SEND_MATCHES) {
                 msg.push_str("- ");
                 msg.push_str(&path.display().to_string());
                 msg.push('\n');
             }
-
             bot.send_message(chat_id, msg.trim_end().to_string())
                 .await?;
             Ok(true)
@@ -659,13 +732,26 @@ async fn try_handle_direct_send_request(bot: &Bot, chat_id: ChatId, text: &str) 
 
 fn extract_requested_attachment_path(text: &str) -> Option<String> {
     let re = Regex::new(
-        r#"(?i)\b(?:send|upload)\b[^\n]*?\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)\b"#,
+        r#"(?i)\b(?:send|upload)\b[^\n]*?((?:/|~\/|\.\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)"#,
     )
     .unwrap();
 
     re.captures(text)
         .and_then(|captures| captures.get(1))
         .map(|m| m.as_str().to_string())
+}
+
+fn is_recent_file_followup_request(text: &str) -> bool {
+    let text_lower = text.to_ascii_lowercase();
+
+    (text_lower.contains("send") || text_lower.contains("upload"))
+        && (text_lower.contains("located file")
+            || text_lower.contains("found file")
+            || text_lower.contains("file you found")
+            || text_lower.contains("located document")
+            || text_lower.contains("found document")
+            || text_lower.contains("located image")
+            || text_lower.contains("found image"))
 }
 
 fn infer_attachment_kind(text: &str, path: &str) -> OutgoingAttachmentKind {
@@ -691,15 +777,20 @@ fn infer_attachment_kind(text: &str, path: &str) -> OutgoingAttachmentKind {
     }
 }
 
-fn find_workspace_files_by_name(name_or_path: &str) -> Result<Vec<PathBuf>> {
-    let cwd = env::current_dir().context("Failed to resolve current working directory")?;
+fn find_workspace_files_by_name(name_or_path: &str, state: &AppState) -> Result<Vec<PathBuf>> {
     let target_name = Path::new(name_or_path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(name_or_path);
 
     let mut matches = Vec::new();
-    walk_workspace_for_name(&cwd, target_name, &mut matches)?;
+    for root in workspace_search_roots(state)? {
+        if !root.is_dir() {
+            continue;
+        }
+        walk_workspace_for_name(&root, target_name, &mut matches)?;
+    }
+    dedupe_paths(&mut matches);
     Ok(matches)
 }
 
@@ -905,22 +996,12 @@ where
     Ok(collected)
 }
 
-fn thinking_status_text(tool_iterations: usize) -> String {
-    format!(
-        "🧠 ZeroClaw is thinking...\n🔧 Observed tool calls: {}",
-        tool_iterations
-    )
+fn thinking_status_text(_tool_iterations: usize) -> String {
+    "🧠 ZeroClaw is thinking...".to_string()
 }
 
-fn finished_status_text(tool_iterations: usize, telemetry_observed: bool) -> String {
-    if telemetry_observed {
-        format!(
-            "✅ ZeroClaw finished.\n🔧 Observed tool calls: {}",
-            tool_iterations
-        )
-    } else {
-        "✅ ZeroClaw finished.\n🔧 Tool calls: unknown (no ZeroClaw telemetry seen)".to_string()
-    }
+fn finished_status_text(_tool_iterations: usize, _telemetry_observed: bool) -> String {
+    "✅ ZeroClaw finished.".to_string()
 }
 
 async fn update_thinking_status(
@@ -1038,8 +1119,9 @@ async fn send_local_attachment(
     kind: OutgoingAttachmentKind,
     path_str: &str,
     caption: Option<&str>,
-) -> Result<()> {
-    let path = resolve_local_path(path_str)?;
+    state: &AppState,
+) -> Result<PathBuf> {
+    let path = resolve_existing_local_path(path_str, state)?;
     let metadata = fs::metadata(&path)
         .await
         .with_context(|| format!("Failed to stat {}", path.display()))?;
@@ -1070,23 +1152,140 @@ async fn send_local_attachment(
         }
     }
 
-    Ok(())
+    Ok(path)
 }
 
-fn resolve_local_path(path_str: &str) -> Result<PathBuf> {
-    let trimmed = path_str.trim();
+fn resolve_existing_local_path(path_str: &str, state: &AppState) -> Result<PathBuf> {
+    let candidates = candidate_local_paths(path_str, state)?;
+
+    for candidate in &candidates {
+        if std::fs::metadata(candidate)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            return Ok(candidate.clone());
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to locate local file `{}`. Checked: {}",
+        normalize_path_str(path_str)?,
+        candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn candidate_local_paths(path_str: &str, state: &AppState) -> Result<Vec<PathBuf>> {
+    let trimmed = normalize_path_str(path_str)?;
+    let path = Path::new(trimmed);
+    let mut candidates = Vec::new();
+
+    if let Some(home_relative) = trimmed.strip_prefix("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join(home_relative));
+        } else {
+            candidates.push(PathBuf::from(trimmed));
+        }
+    } else if path.is_absolute() {
+        candidates.push(path.to_path_buf());
+    } else {
+        let cwd = env::current_dir().context("Failed to resolve current working directory")?;
+        candidates.push(cwd.join(path));
+
+        if let Some(workspace_dir) = &state.zeroclaw_workspace_dir {
+            let workspace_candidate = workspace_dir.join(path);
+            if workspace_candidate != candidates[0] {
+                candidates.push(workspace_candidate);
+            }
+        }
+    }
+
+    dedupe_paths(&mut candidates);
+    Ok(candidates)
+}
+
+fn normalize_path_str(path_str: &str) -> Result<&str> {
+    let trimmed = path_str
+        .trim()
+        .trim_matches(|ch| matches!(ch, '`' | '"' | '\''));
     if trimmed.is_empty() {
         return Err(anyhow!("Attachment path is empty"));
     }
+    Ok(trimmed)
+}
 
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(env::current_dir()
-            .context("Failed to resolve current working directory")?
-            .join(path))
+fn workspace_search_roots(state: &AppState) -> Result<Vec<PathBuf>> {
+    let mut roots =
+        vec![env::current_dir().context("Failed to resolve current working directory")?];
+    if let Some(workspace_dir) = &state.zeroclaw_workspace_dir {
+        roots.push(workspace_dir.clone());
     }
+    dedupe_paths(&mut roots);
+    Ok(roots)
+}
+
+fn dedupe_paths(paths: &mut Vec<PathBuf>) {
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths.drain(..) {
+        if deduped.iter().any(|existing| existing == &path) {
+            continue;
+        }
+        deduped.push(path);
+    }
+    *paths = deduped;
+}
+
+fn extract_existing_file_paths_from_text(text: &str, state: &AppState) -> Vec<PathBuf> {
+    let re = Regex::new(
+        r#"(?x)
+        (?P<path>
+            /[A-Za-z0-9._/\-]+
+            |
+            ~/[A-Za-z0-9._/\-]+
+            |
+            \.\.?/[A-Za-z0-9._/\-]+
+        )
+    "#,
+    )
+    .unwrap();
+
+    let mut paths = Vec::new();
+    for captures in re.captures_iter(text) {
+        let Some(path) = captures.name("path") else {
+            continue;
+        };
+        if let Ok(resolved) = resolve_existing_local_path(path.as_str(), state) {
+            paths.push(resolved);
+        }
+    }
+    dedupe_paths(&mut paths);
+    paths
+}
+
+fn default_zeroclaw_workspace_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(DEFAULT_ZEROCLAW_WORKSPACE_SUFFIX))
+}
+
+async fn set_last_referenced_paths(state: &AppState, chat_id: ChatId, mut paths: Vec<PathBuf>) {
+    dedupe_paths(&mut paths);
+    paths.truncate(MAX_DIRECT_SEND_MATCHES);
+
+    let mut contexts = state.chat_contexts.lock().await;
+    let context = contexts.entry(chat_id.0).or_default();
+    context.last_referenced_paths = paths;
+}
+
+async fn get_last_referenced_paths(state: &AppState, chat_id: ChatId) -> Vec<PathBuf> {
+    let contexts = state.chat_contexts.lock().await;
+    contexts
+        .get(&chat_id.0)
+        .map(|context| context.last_referenced_paths.clone())
+        .unwrap_or_default()
 }
 
 fn truncate_telegram_caption(caption: &str) -> String {
@@ -1262,19 +1461,13 @@ mod tests {
     }
 
     #[test]
-    fn finished_status_is_unknown_without_telemetry() {
-        assert_eq!(
-            finished_status_text(0, false),
-            "✅ ZeroClaw finished.\n🔧 Tool calls: unknown (no ZeroClaw telemetry seen)"
-        );
+    fn finished_status_is_plain_without_telemetry() {
+        assert_eq!(finished_status_text(0, false), "✅ ZeroClaw finished.");
     }
 
     #[test]
-    fn finished_status_uses_observed_count_with_telemetry() {
-        assert_eq!(
-            finished_status_text(2, true),
-            "✅ ZeroClaw finished.\n🔧 Observed tool calls: 2"
-        );
+    fn finished_status_is_plain_with_telemetry() {
+        assert_eq!(finished_status_text(2, true), "✅ ZeroClaw finished.");
     }
 
     #[test]
@@ -1304,6 +1497,55 @@ mod tests {
             extract_requested_attachment_path("send me mountains.png by using /sendphoto"),
             Some("mountains.png".to_string())
         );
+    }
+
+    #[test]
+    fn extracts_absolute_requested_attachment_path_from_natural_language() {
+        assert_eq!(
+            extract_requested_attachment_path(
+                "send /home/konst/.zeroclaw/workspace/meeting_elena_16h00.ics"
+            ),
+            Some("/home/konst/.zeroclaw/workspace/meeting_elena_16h00.ics".to_string())
+        );
+    }
+
+    #[test]
+    fn detects_recent_file_followup_requests() {
+        assert!(is_recent_file_followup_request("send me located file"));
+        assert!(is_recent_file_followup_request("upload the file you found"));
+        assert!(!is_recent_file_followup_request(
+            "send me a summary instead"
+        ));
+    }
+
+    #[test]
+    fn resolves_relative_attachment_path_from_workspace_dir() {
+        let test_root = env::temp_dir().join(format!(
+            "tg-zeroclaw-bridge-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace_dir = test_root.join(".zeroclaw").join("workspace");
+        let file_path = workspace_dir.join("meeting_elena_16h00.ics");
+
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::write(&file_path, "BEGIN:VCALENDAR\nEND:VCALENDAR\n").unwrap();
+
+        let state = AppState {
+            allowed_user_id: 0,
+            zeroclaw_bin: DEFAULT_ZEROCLAW_BIN.to_string(),
+            zeroclaw_workspace_dir: Some(workspace_dir),
+            zeroclaw_timeout_sec: DEFAULT_TIMEOUT_SEC,
+            run_lock: Arc::new(Mutex::new(())),
+            chat_contexts: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let resolved = resolve_existing_local_path("meeting_elena_16h00.ics", &state).unwrap();
+        assert_eq!(resolved, file_path);
+
+        std::fs::remove_dir_all(&test_root).unwrap();
     }
 
     #[test]

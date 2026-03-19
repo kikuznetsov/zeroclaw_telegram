@@ -39,6 +39,7 @@ The bot reads configuration from environment variables:
 | `TG_BOT_TOKEN` | yes | none | Telegram bot token |
 | `TG_ALLOWED_USER_ID` | yes | none | Only this Telegram user ID is allowed to use the bot |
 | `ZEROCLAW_BIN` | no | `/home/konst/zeroclaw` | Path to the local `zeroclaw` executable |
+| `ZEROCLAW_WORKSPACE_DIR` | no | `$HOME/.zeroclaw/workspace` | Workspace root used to resolve relative files for Telegram uploads |
 | `ZEROCLAW_TIMEOUT_SEC` | no | `240` | Timeout for both `zeroclaw` and `/sh` commands |
 
 Use `.env.example` as a reference, then export the variables in your shell or define them in your service manager.
@@ -77,6 +78,7 @@ Then set the runtime environment and run it on the target machine:
 export TG_BOT_TOKEN="1234567890:your_token"
 export TG_ALLOWED_USER_ID="123456789"
 export ZEROCLAW_BIN="/home/konst/zeroclaw"
+export ZEROCLAW_WORKSPACE_DIR="$HOME/.zeroclaw/workspace"
 export ZEROCLAW_TIMEOUT_SEC="240"
 ```
 
@@ -86,6 +88,7 @@ For a local native run during development:
 export TG_BOT_TOKEN="1234567890:your_token"
 export TG_ALLOWED_USER_ID="123456789"
 export ZEROCLAW_BIN="/home/konst/zeroclaw"
+export ZEROCLAW_WORKSPACE_DIR="$HOME/.zeroclaw/workspace"
 export ZEROCLAW_TIMEOUT_SEC="240"
 
 cargo run --release
@@ -117,6 +120,7 @@ Any non-command text message is also forwarded to ZeroClaw.
 - Long replies are split into Telegram-sized chunks.
 - ANSI escape sequences are stripped from command output.
 - Telegram documents and photos are stored under `.telegram_uploads/` so ZeroClaw can inspect them with local tools.
+- Relative upload paths are resolved against both the bot working directory and `ZEROCLAW_WORKSPACE_DIR`.
 - ZeroClaw can request a real Telegram upload by emitting one of these lines on its own line:
   `[[telegram_document:relative/or/absolute/path|optional caption]]`
   `[[telegram_photo:relative/or/absolute/path|optional caption]]`
