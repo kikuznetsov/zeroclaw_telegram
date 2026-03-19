@@ -40,6 +40,7 @@ The bot reads configuration from environment variables:
 | `TG_ALLOWED_USER_ID` | yes | none | Only this Telegram user ID is allowed to use the bot |
 | `ZEROCLAW_BIN` | no | `/home/konst/zeroclaw` | Path to the local `zeroclaw` executable |
 | `ZEROCLAW_WORKSPACE_DIR` | no | `$HOME/.zeroclaw/workspace` | Workspace root used to resolve relative files for Telegram uploads |
+| `CHAT_STORE_PATH` | no | `./.chat_store.json` | JSON file used to persist per-chat history, recent paths, and remembered facts |
 | `ZEROCLAW_TIMEOUT_SEC` | no | `240` | Timeout for both `zeroclaw` and `/sh` commands |
 
 Use `.env.example` as a reference, then export the variables in your shell or define them in your service manager.
@@ -79,6 +80,7 @@ export TG_BOT_TOKEN="1234567890:your_token"
 export TG_ALLOWED_USER_ID="123456789"
 export ZEROCLAW_BIN="/home/konst/zeroclaw"
 export ZEROCLAW_WORKSPACE_DIR="$HOME/.zeroclaw/workspace"
+export CHAT_STORE_PATH="$PWD/.chat_store.json"
 export ZEROCLAW_TIMEOUT_SEC="240"
 ```
 
@@ -89,6 +91,7 @@ export TG_BOT_TOKEN="1234567890:your_token"
 export TG_ALLOWED_USER_ID="123456789"
 export ZEROCLAW_BIN="/home/konst/zeroclaw"
 export ZEROCLAW_WORKSPACE_DIR="$HOME/.zeroclaw/workspace"
+export CHAT_STORE_PATH="$PWD/.chat_store.json"
 export ZEROCLAW_TIMEOUT_SEC="240"
 
 cargo run --release
@@ -105,6 +108,8 @@ If you want it to stay running on a server or Raspberry Pi, run the compiled bin
 | `/raw <prompt>` | Send prompt directly to ZeroClaw |
 | `/ask <prompt>` | Same as `/raw` |
 | `/sh <command>` | Run a shell command on the host |
+| `/ls [path]` | Run `ls -la` for the current directory or a provided path |
+| `/cat <path>` | Print a local file with `cat` |
 | `/date` | Run `date` |
 | `/free` | Run `free -h` |
 | `/uptime` | Run `uptime` |
@@ -119,6 +124,10 @@ Any non-command text message is also forwarded to ZeroClaw.
 
 - Long replies are split into Telegram-sized chunks.
 - ANSI escape sequences are stripped from command output.
+- Bridge-mode prompts include the last 10 stored chat messages for that `chat_id` as context.
+- The bot persists recent chat history, recent file references, and simple remembered facts in `CHAT_STORE_PATH`.
+- Simple user facts like `my favorite color is red` are captured and injected into future bridge prompts.
+- That history is used for normal chat and `/ask`, but not for `/raw`, `/sh`, `/ls`, or `/cat`.
 - Telegram documents and photos are stored under `.telegram_uploads/` so ZeroClaw can inspect them with local tools.
 - Relative upload paths are resolved against both the bot working directory and `ZEROCLAW_WORKSPACE_DIR`.
 - ZeroClaw can request a real Telegram upload by emitting one of these lines on its own line:
