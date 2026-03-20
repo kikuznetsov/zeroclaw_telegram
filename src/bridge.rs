@@ -12,11 +12,19 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
 
 const STATUS_UPDATE_INTERVAL_MS: u64 = 800;
+const DEFAULT_ZEROCLAW_PROVIDER: &str = "openai-codex";
+const DEFAULT_ZEROCLAW_MODEL: &str = "gpt-5.4-mini";
 
 #[derive(Clone, Copy)]
 pub(crate) enum PromptMode {
     Bridge,
     Raw,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AgentProfile {
+    Default,
+    Fast,
 }
 
 pub(crate) struct ZeroclawRunResult {
@@ -43,6 +51,7 @@ pub(crate) async fn run_zeroclaw(
     prompt: &str,
     state: &AppState,
     prompt_mode: PromptMode,
+    agent_profile: AgentProfile,
 ) -> Result<ZeroclawRunResult> {
     let (history, facts) = match prompt_mode {
         PromptMode::Bridge => (
@@ -53,9 +62,7 @@ pub(crate) async fn run_zeroclaw(
     };
     let prepared_prompt = prepare_zeroclaw_prompt(prompt, prompt_mode, &history, &facts);
     let mut cmd = Command::new(&state.zeroclaw_bin);
-    cmd.arg("agent")
-        .arg("-m")
-        .arg(&prepared_prompt)
+    cmd.args(zeroclaw_agent_args(&prepared_prompt, agent_profile))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("ZEROCLAW_OBSERVABILITY_BACKEND", "log")
@@ -190,6 +197,21 @@ pub(crate) fn thinking_status_text(_tool_iterations: usize) -> String {
 
 pub(crate) fn finished_status_text(_tool_iterations: usize, _telemetry_observed: bool) -> String {
     "✅ ZeroClaw finished.".to_string()
+}
+
+fn zeroclaw_agent_args(prompt: &str, agent_profile: AgentProfile) -> Vec<String> {
+    let mut args = vec!["agent".to_string()];
+
+    if matches!(agent_profile, AgentProfile::Default) {
+        args.push("--provider".to_string());
+        args.push(DEFAULT_ZEROCLAW_PROVIDER.to_string());
+        args.push("--model".to_string());
+        args.push(DEFAULT_ZEROCLAW_MODEL.to_string());
+    }
+
+    args.push("-m".to_string());
+    args.push(prompt.to_string());
+    args
 }
 
 async fn read_stream<R>(
@@ -388,5 +410,29 @@ mod tests {
         assert!(prompt.contains("[user]\nprevious user message"));
         assert!(prompt.contains("[assistant]\nprevious assistant message"));
         assert!(prompt.contains("User request:\ncurrent request"));
+    }
+
+    #[test]
+    fn default_agent_profile_uses_openai_codex_model() {
+        assert_eq!(
+            zeroclaw_agent_args("hello", AgentProfile::Default),
+            vec![
+                "agent",
+                "--provider",
+                "openai-codex",
+                "--model",
+                "gpt-5.4",
+                "-m",
+                "hello",
+            ]
+        );
+    }
+
+    #[test]
+    fn fast_agent_profile_uses_plain_agent_mode() {
+        assert_eq!(
+            zeroclaw_agent_args("hello", AgentProfile::Fast),
+            vec!["agent", "-m", "hello"]
+        );
     }
 }

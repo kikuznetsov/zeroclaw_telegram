@@ -5,7 +5,8 @@ Small Rust Telegram bot that forwards prompts to a local `zeroclaw` binary and c
 ## What It Does
 
 - Accepts Telegram messages from one authorized user.
-- Sends plain text prompts to `zeroclaw agent -m "<prompt>"`.
+- Sends normal bridge prompts to `zeroclaw agent --provider openai-codex --model gpt-5.4 -m "<prompt>"`.
+- Supports a faster plain path with `zeroclaw agent -m "<prompt>"`.
 - Downloads Telegram documents and photos into a local workspace directory and passes their paths to ZeroClaw.
 - Can send local files and images back into Telegram.
 - Supports helper commands such as `/ping`, `/date`, `/free`, `/uptime`, and `/status`.
@@ -105,8 +106,9 @@ If you want it to stay running on a server or Raspberry Pi, run the compiled bin
 | --- | --- |
 | `/ping` | Health check |
 | `/id` | Show your Telegram user ID |
-| `/raw <prompt>` | Send prompt directly to ZeroClaw |
-| `/ask <prompt>` | Same as `/raw` |
+| `/raw <prompt>` | Send a raw prompt directly to ZeroClaw using the default Codex/OpenAI invocation |
+| `/ask <prompt>` | Ask ZeroClaw with bridge context using `--provider openai-codex --model gpt-5.4` |
+| `/askfast <prompt>` | Ask ZeroClaw with bridge context using plain `agent -m` |
 | `/sh <command>` | Run a shell command on the host |
 | `/ls [path]` | Run `ls -la` for the current directory or a provided path |
 | `/cat <path>` | Print a local file with `cat` |
@@ -124,10 +126,12 @@ Any non-command text message is also forwarded to ZeroClaw.
 
 - Long replies are split into Telegram-sized chunks.
 - ANSI escape sequences are stripped from command output.
+- Normal chat, `/ask`, and `/raw` use `zeroclaw agent --provider openai-codex --model gpt-5.4 -m ...`.
+- `/askfast` uses `zeroclaw agent -m ...` without the provider/model override.
 - Bridge-mode prompts include the last 10 stored chat messages for that `chat_id` as context.
 - The bot persists recent chat history, recent file references, and simple remembered facts in `CHAT_STORE_PATH`.
 - Simple user facts like `my favorite color is red` are captured and injected into future bridge prompts.
-- That history is used for normal chat and `/ask`, but not for `/raw`, `/sh`, `/ls`, or `/cat`.
+- That history is used for normal chat, `/ask`, and `/askfast`, but not for `/raw`, `/sh`, `/ls`, or `/cat`.
 - Telegram documents and photos are stored under `.telegram_uploads/` so ZeroClaw can inspect them with local tools.
 - Relative upload paths are resolved against both the bot working directory and `ZEROCLAW_WORKSPACE_DIR`.
 - ZeroClaw can request a real Telegram upload by emitting one of these lines on its own line:

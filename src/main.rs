@@ -11,7 +11,8 @@ use attachments::{
     send_local_attachment, try_handle_direct_send_request, OutgoingAttachmentKind,
 };
 use bridge::{
-    finished_status_text, run_zeroclaw, thinking_status_text, PromptMode, ZeroclawRunResult,
+    finished_status_text, run_zeroclaw, thinking_status_text, AgentProfile, PromptMode,
+    ZeroclawRunResult,
 };
 use chat_state::{ChatHistoryRole, ChatStore};
 use prompt::{
@@ -56,6 +57,8 @@ enum Cmd {
     Raw(String),
     #[command(description = "ask zeroclaw explicitly")]
     Ask(String),
+    #[command(description = "ask zeroclaw without the default Codex provider/model override")]
+    Askfast(String),
     #[command(description = "run shell command directly")]
     Sh(String),
     #[command(description = "list files with ls -la [path]")]
@@ -168,8 +171,16 @@ async fn handle_message(bot: Bot, msg: Message, state: AppState) -> Result<()> {
                     return Ok(());
                 }
                 Cmd::Raw(prompt) => {
-                    run_and_reply(&bot, msg.chat.id, &prompt, None, &state, PromptMode::Raw)
-                        .await?;
+                    run_and_reply(
+                        &bot,
+                        msg.chat.id,
+                        &prompt,
+                        None,
+                        &state,
+                        PromptMode::Raw,
+                        AgentProfile::Default,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 Cmd::Ask(prompt) => {
@@ -181,6 +192,21 @@ async fn handle_message(bot: Bot, msg: Message, state: AppState) -> Result<()> {
                         Some(history_message),
                         &state,
                         PromptMode::Bridge,
+                        AgentProfile::Default,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Cmd::Askfast(prompt) => {
+                    let history_message = prompt.clone();
+                    run_and_reply(
+                        &bot,
+                        msg.chat.id,
+                        &prompt,
+                        Some(history_message),
+                        &state,
+                        PromptMode::Bridge,
+                        AgentProfile::Fast,
                     )
                     .await?;
                     return Ok(());
@@ -268,6 +294,7 @@ async fn handle_message(bot: Bot, msg: Message, state: AppState) -> Result<()> {
             Some(text.to_string()),
             &state,
             PromptMode::Bridge,
+            AgentProfile::Default,
         )
         .await;
     }
@@ -284,6 +311,7 @@ async fn handle_message(bot: Bot, msg: Message, state: AppState) -> Result<()> {
             history_message,
             &state,
             PromptMode::Bridge,
+            AgentProfile::Default,
         )
         .await;
     }
@@ -304,12 +332,23 @@ async fn run_and_reply(
     history_user_message: Option<String>,
     state: &AppState,
     prompt_mode: PromptMode,
+    agent_profile: AgentProfile,
 ) -> Result<()> {
     let _guard = state.run_lock.lock().await;
 
     let status_msg = send_status(bot, chat_id, &thinking_status_text(0)).await?;
 
-    let result = match run_zeroclaw(bot, chat_id, status_msg.id, prompt, state, prompt_mode).await {
+    let result = match run_zeroclaw(
+        bot,
+        chat_id,
+        status_msg.id,
+        prompt,
+        state,
+        prompt_mode,
+        agent_profile,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(err) => ZeroclawRunResult {
             output: format!("❌ Error:\n{err:#}"),
