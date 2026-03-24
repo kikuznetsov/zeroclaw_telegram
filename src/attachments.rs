@@ -629,6 +629,7 @@ fn truncate_telegram_caption(caption: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::{DEFAULT_ZEROCLAW_MODEL, DEFAULT_ZEROCLAW_PROVIDER};
     use crate::chat_state::ChatStore;
     use crate::{DEFAULT_TIMEOUT_SEC, DEFAULT_ZEROCLAW_BIN};
     use std::sync::Arc;
@@ -645,6 +646,8 @@ mod tests {
         AppState {
             allowed_user_id: 0,
             zeroclaw_bin: DEFAULT_ZEROCLAW_BIN.to_string(),
+            zeroclaw_provider: DEFAULT_ZEROCLAW_PROVIDER.to_string(),
+            zeroclaw_model: DEFAULT_ZEROCLAW_MODEL.to_string(),
             zeroclaw_workspace_dir: workspace_dir,
             zeroclaw_timeout_sec: DEFAULT_TIMEOUT_SEC,
             run_lock: Arc::new(Mutex::new(())),

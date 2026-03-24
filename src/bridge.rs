@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
 
 const STATUS_UPDATE_INTERVAL_MS: u64 = 800;
-const DEFAULT_ZEROCLAW_PROVIDER: &str = "openai-codex";
-const DEFAULT_ZEROCLAW_MODEL: &str = "gpt-5.4-mini";
+pub(crate) const DEFAULT_ZEROCLAW_PROVIDER: &str = "openai-codex";
+pub(crate) const DEFAULT_ZEROCLAW_MODEL: &str = "gpt-5.4";
 
 #[derive(Clone, Copy)]
 pub(crate) enum PromptMode {
@@ -62,16 +62,21 @@ pub(crate) async fn run_zeroclaw(
     };
     let prepared_prompt = prepare_zeroclaw_prompt(prompt, prompt_mode, &history, &facts);
     let mut cmd = Command::new(&state.zeroclaw_bin);
-    cmd.args(zeroclaw_agent_args(&prepared_prompt, agent_profile))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("ZEROCLAW_OBSERVABILITY_BACKEND", "log")
-        .env(
-            "RUST_LOG",
-            "zeroclaw::agent=info,zeroclaw::tools=info,error",
-        )
-        .env("CLICOLOR", "0")
-        .env("NO_COLOR", "1");
+    cmd.args(zeroclaw_agent_args(
+        &prepared_prompt,
+        agent_profile,
+        &state.zeroclaw_provider,
+        &state.zeroclaw_model,
+    ))
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .env("ZEROCLAW_OBSERVABILITY_BACKEND", "log")
+    .env(
+        "RUST_LOG",
+        "zeroclaw::agent=info,zeroclaw::tools=info,error",
+    )
+    .env("CLICOLOR", "0")
+    .env("NO_COLOR", "1");
 
     let mut child = cmd.spawn().context("Failed to spawn zeroclaw")?;
     let stdout = child
@@ -199,14 +204,19 @@ pub(crate) fn finished_status_text(_tool_iterations: usize, _telemetry_observed:
     "✅ ZeroClaw finished.".to_string()
 }
 
-fn zeroclaw_agent_args(prompt: &str, agent_profile: AgentProfile) -> Vec<String> {
+fn zeroclaw_agent_args(
+    prompt: &str,
+    agent_profile: AgentProfile,
+    provider: &str,
+    model: &str,
+) -> Vec<String> {
     let mut args = vec!["agent".to_string()];
 
     if matches!(agent_profile, AgentProfile::Default) {
         args.push("--provider".to_string());
-        args.push(DEFAULT_ZEROCLAW_PROVIDER.to_string());
+        args.push(provider.to_string());
         args.push("--model".to_string());
-        args.push(DEFAULT_ZEROCLAW_MODEL.to_string());
+        args.push(model.to_string());
     }
 
     args.push("-m".to_string());
@@ -415,7 +425,12 @@ mod tests {
     #[test]
     fn default_agent_profile_uses_openai_codex_model() {
         assert_eq!(
-            zeroclaw_agent_args("hello", AgentProfile::Default),
+            zeroclaw_agent_args(
+                "hello",
+                AgentProfile::Default,
+                DEFAULT_ZEROCLAW_PROVIDER,
+                DEFAULT_ZEROCLAW_MODEL,
+            ),
             vec![
                 "agent",
                 "--provider",
@@ -431,7 +446,12 @@ mod tests {
     #[test]
     fn fast_agent_profile_uses_plain_agent_mode() {
         assert_eq!(
-            zeroclaw_agent_args("hello", AgentProfile::Fast),
+            zeroclaw_agent_args(
+                "hello",
+                AgentProfile::Fast,
+                DEFAULT_ZEROCLAW_PROVIDER,
+                DEFAULT_ZEROCLAW_MODEL,
+            ),
             vec!["agent", "-m", "hello"]
         );
     }

@@ -12,7 +12,7 @@ use attachments::{
 };
 use bridge::{
     finished_status_text, run_zeroclaw, thinking_status_text, AgentProfile, PromptMode,
-    ZeroclawRunResult,
+    ZeroclawRunResult, DEFAULT_ZEROCLAW_MODEL, DEFAULT_ZEROCLAW_PROVIDER,
 };
 use chat_state::{ChatHistoryRole, ChatStore};
 use prompt::{
@@ -39,6 +39,8 @@ const DEFAULT_TIMEOUT_SEC: u64 = 240;
 struct AppState {
     allowed_user_id: i64,
     zeroclaw_bin: String,
+    zeroclaw_provider: String,
+    zeroclaw_model: String,
     zeroclaw_workspace_dir: Option<PathBuf>,
     zeroclaw_timeout_sec: u64,
     /// Serialize requests because the target host is resource-constrained.
@@ -91,6 +93,10 @@ async fn main() -> Result<()> {
 
     let zeroclaw_bin =
         env::var("ZEROCLAW_BIN").unwrap_or_else(|_| DEFAULT_ZEROCLAW_BIN.to_string());
+    let zeroclaw_provider =
+        env::var("ZEROCLAW_PROVIDER").unwrap_or_else(|_| DEFAULT_ZEROCLAW_PROVIDER.to_string());
+    let zeroclaw_model =
+        env::var("ZEROCLAW_MODEL").unwrap_or_else(|_| DEFAULT_ZEROCLAW_MODEL.to_string());
     let zeroclaw_workspace_dir = env::var_os("ZEROCLAW_WORKSPACE_DIR")
         .map(PathBuf::from)
         .or_else(default_zeroclaw_workspace_dir);
@@ -108,6 +114,8 @@ async fn main() -> Result<()> {
     let state = AppState {
         allowed_user_id,
         zeroclaw_bin,
+        zeroclaw_provider,
+        zeroclaw_model,
         zeroclaw_workspace_dir,
         zeroclaw_timeout_sec,
         run_lock: Arc::new(Mutex::new(())),

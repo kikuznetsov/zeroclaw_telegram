@@ -40,6 +40,8 @@ The bot reads configuration from environment variables:
 | `TG_BOT_TOKEN` | yes | none | Telegram bot token |
 | `TG_ALLOWED_USER_ID` | yes | none | Only this Telegram user ID is allowed to use the bot |
 | `ZEROCLAW_BIN` | no | `/home/konst/zeroclaw` | Path to the local `zeroclaw` executable |
+| `ZEROCLAW_PROVIDER` | no | `openai-codex` | Provider override used for normal chat, `/ask`, and `/raw` |
+| `ZEROCLAW_MODEL` | no | `gpt-5.4` | Model override paired with `ZEROCLAW_PROVIDER` |
 | `ZEROCLAW_WORKSPACE_DIR` | no | `$HOME/.zeroclaw/workspace` | Workspace root used to resolve relative files for Telegram uploads |
 | `CHAT_STORE_PATH` | no | `./.chat_store.json` | JSON file used to persist per-chat history, recent paths, and remembered facts |
 | `ZEROCLAW_TIMEOUT_SEC` | no | `240` | Timeout for both `zeroclaw` and `/sh` commands |
@@ -80,6 +82,8 @@ Then set the runtime environment and run it on the target machine:
 export TG_BOT_TOKEN="1234567890:your_token"
 export TG_ALLOWED_USER_ID="123456789"
 export ZEROCLAW_BIN="/home/konst/zeroclaw"
+export ZEROCLAW_PROVIDER="openai-codex"
+export ZEROCLAW_MODEL="gpt-5.4"
 export ZEROCLAW_WORKSPACE_DIR="$HOME/.zeroclaw/workspace"
 export CHAT_STORE_PATH="$PWD/.chat_store.json"
 export ZEROCLAW_TIMEOUT_SEC="240"
@@ -91,6 +95,8 @@ For a local native run during development:
 export TG_BOT_TOKEN="1234567890:your_token"
 export TG_ALLOWED_USER_ID="123456789"
 export ZEROCLAW_BIN="/home/konst/zeroclaw"
+export ZEROCLAW_PROVIDER="openai-codex"
+export ZEROCLAW_MODEL="gpt-5.4"
 export ZEROCLAW_WORKSPACE_DIR="$HOME/.zeroclaw/workspace"
 export CHAT_STORE_PATH="$PWD/.chat_store.json"
 export ZEROCLAW_TIMEOUT_SEC="240"
